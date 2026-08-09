@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32 Smart IoT Home Dashboard</title>
+
+  <!-- Firebase -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-app.js";
+    import {
+      getAuth, onAuthStateChanged, signInWithEmailAndPassword,
+      signOut
+    } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-auth.js";
+    import {
+      getDatabase, ref, onValue, set
+    } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyCfWjcOszY3tpYPFl7WOpucSdHQaMemqc8",
+      authDomain: "smart-iot-home-b37ae.firebaseapp.com",
+      databaseURL: "https://smart-iot-home-b37ae-default-rtdb.firebaseio.com",
+      projectId: "smart-iot-home-b37ae"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getDatabase(app);
+
+    window.firebaseAPI = { auth, db, ref, onValue, set, signInWithEmailAndPassword, signOut };
+
+    const $ = id => document.getElementById(id);
+
+    // -----------------------------
+    // Login
+    // -----------------------------
+    onAuthStateChanged(auth, user => {
+      if (user) {
+        $("loginScreen").classList.add("hidden");
+        $("app").classList.remove("hidden");
+        $("userEmail").textContent = user.email || "User";
+        startRealtime();
+      } else {
+        $("loginScreen").classList.remove("hidden");
+        $("app").classList.add("hidden");
+      }
+    });
+
+    $("loginForm").addEventListener("submit", async e => {
+      e.preventDefault();
+      $("loginError").textContent = "";
+      try {
+        await signInWithEmailAndPassword(
+          auth,
+          $("email").value.trim(),
+          $("password").value
+        );
+      } catch (err) {
+        $("loginError").textContent = err.message.replace("Firebase: ", "");
+      }
+    });
+
+    $("logoutBtn").addEventListener("click", () => signOut(auth));
+
+    // -----------------------------
+    // Realtime Firebase
+    // -----------------------------
+    let tempHistory = [];
+    let humHistory = [];
+    let chart;
+    let chartStarted = false;
+
+    function startRealtime() {
+      // Temperature
+      onValue(ref(db, "Sensor/temperature"), snap => {
+        const value = Number(snap.val());
+        if (!Number.isNaN(value)) {
+          updateText("temperature", value.toFixed(1) + " °C");
+          updateText("temperatureHome", value.toFixed(1) + " °C");
+          updateText("tempSmall", value.toFixed(1) + " °C");
+          updateStatus("tempStatus", "Live sensor");
+          pushHistory(tempHistory, value);
+          updateChart();
+        }
+      });
+
+      // Humidity
+      onValue(ref(db, "Sensor/humidity"), snap => {
+        const value = Number(snap.val());
+        if (!Number.isNaN(value)) {
+          updateText("humidity", value.toFixed(1) + " %");
+          updateText("humidityHome", value.toFixed(1) + " %");
+          updateText("humSmall", value.toFixed(1) + " %");
+          updateStatus("humStatus", "Live sensor");
+          pushHistory(humHistory, value);
+          updateChart();
+        }
+      });
+
+      // LED
+      onValue(ref(db, "LED/digital"), snap => {
+        const value = Boolean(snap.val());
+        setLedUI(value);
+      });
+
+      // Fan
+      onValue(ref(db, "Fan/pwm"), snap => {
+        let value = Number(snap.val());
+        if (Number.isNaN(value)) value = 0;
+        value = Math.max(0, Math.min(255, value));
+        $("fanSlider").value = value;
+        setFanUI(value);
+      });
+
+      // Servo
+      onValue(ref(db, "Servo/angle"), snap => {
+        let value = Number(snap.val());
+        if (Number.isNaN(value)) value = 90;
+        value = Math.max(0, Math.min(180, value));
+        $("servoSlider").value = value;
+        setServoUI(value);
+      });
+    }
+
+    function pushHistory(arr, value) {
+      arr.push({ time: new Date(), value });
+      if (arr.length > 30) arr.shift();
+    }
+
+    function updateChart() {
+      if (!window.Chart) return;
+      if (!chartStarted) {
+        createChart();
+        chartStarted = true;
+      }
+      const count = Math.max(tempHistory.length, humHistory.length);
+      const labels = Array.from({length: count}, (_, i) => {
+        const item = tempHistory[i] || humHistory[i];
+        return item ? item.time.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) : "";
+      });
+
+      chart.data.labels = labels;
+      chart.data.datasets[0].data = tempHistory.map(x => x.value);
+      chart.data.datasets[1].data = humHistory.map(x => x.value);
+      chart.update("none");
+    }
+
+    function createChart() {
+      const ctx = $("sensorChart").getContext("2d");
+      chart = new Chart(ctx, {
+        type: "line",
+        data: {
+          labels: [],
+          datasets: [
+            {
+              label: "Temperature (°C)",
+              data: [],
+              borderColor: "#ff9f43",
+              backgroundColor: "rgba(255,159,67,.12)",
+              tension: .42,
+              fill: true,
+              pointRadius: 2,
+              pointHoverRadius: 5
+            },
+            {
+              label: "Humidity (%)",
+              data: [],
+              borderColor: "#19c8ff",
+              backgroundColor: "rgba(25,200,255,.10)",
+              tension: .42,
+              fill: true,
+              pointRadius: 2,
+              pointHoverRadius: 5
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          plugins: {
+            legend: {
+              labels: { color: "#c9d4e7", usePointStyle: true }
+            }
+          },
+          scales: {
+            x: {
+              ticks: { color: "#71809b" },
+              grid: { color: "rgba(255,255,255,.045)" }
+            },
+            y: {
+              ticks: { color: "#71809b" },
+              grid: { color: "rgba(255,255,255,.045)" }
+            }
+          }
+        }
+      });
+    }
+
+    function updateText(id, text) {
+      if ($(id)) $(id).textContent = text;
+    }
+
+    function updateStatus(id, text) {
+      if ($(id)) $(id).textContent = text;
+    }
+
+    function setLedUI(on) {
+      $("ledToggle").checked = on;
+      $("ledState").textContent = on ? "ON" : "OFF";
+      $("ledState").className = "device-state " + (on ? "on" : "off");
+      $("bulbIcon").classList.toggle("glow", on);
+      $("homeBulb").classList.toggle("on", on);
+      $("ledHomeState").textContent = on ? "ON" : "OFF";
+    }
+
+    function setFanUI(value) {
+      const percent = Math.round((value / 255) * 100);
+      $("fanValue").textContent = percent + "%";
+      $("fanPwmValue").textContent = value;
+      $("fanStatus").textContent = value === 0 ? "Fan OFF" : "Fan running";
+      $("fanVisual").style.setProperty("--fan-speed", Math.max(0, percent / 100));
+    }
+
+    function setServoUI(value) {
+      $("servoValue").textContent = value + "°";
+      $("servoAngleText").textContent = value + "°";
+      $("servoKnob").style.transform = `rotate(${value - 90}deg)`;
+      $("servoNeedle").style.transform = `rotate(${value - 90}deg)`;
+    }
+
+    window.control = {
+      async led(value) {
+        try {
+          await set(ref(db, "LED/digital"), value);
+        } catch (e) {
+          alert("LED control failed: " + e.message);
+        }
+      },
+      async fan(value) {
+        try {
+          await set(ref(db, "Fan/pwm"), Number(value));
+        } catch (e) {
+          alert("Fan control failed: " + e.message);
+        }
+      },
+      async servo(value) {
+        try {
+          await set(ref(db, "Servo/angle"), Number(value));
+        } catch (e) {
+          alert("Servo control failed: " + e.message);
+        }
+      }
+    };
+  </script>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js"></script>
+
+  <style>
+    :root {
+      --bg: #070a12;
+      --panel: #0d1220;
+      --panel2: #11182a;
+      --line: rgba(255,255,255,.075);
+      --text: #edf3ff;
+      --muted: #7e8ba5;
+      --purple: #7c4dff;
+      --cyan: #19c8ff;
+      --green: #27e6a0;
+      --orange: #ff9f43;
+      --pink: #ff4fa3;
+      --danger: #ff5570;
+      --shadow: 0 20px 60px rgba(0,0,0,.35);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin:0; min-height:100%; }
+    body {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 75% 0%, rgba(102,66,255,.13), transparent 30%),
+        radial-gradient(circle at 15% 100%, rgba(0,198,255,.07), transparent 30%),
+        var(--bg);
+      color:var(--text);
+    }
+
+    button, input { font:inherit; }
+    .hidden { display:none !important; }
+
+    /* Login */
+    #loginScreen {
+      min-height:100vh;
+      display:grid;
+      place-items:center;
+      padding:24px;
+    }
+    .login-card {
+      width:min(430px, 100%);
+      padding:36px;
+      background:rgba(13,18,32,.9);
+      border:1px solid var(--line);
+      border-radius:28px;
+      box-shadow:var(--shadow);
+      backdrop-filter:blur(20px);
+    }
+    .brand-mark {
+      width:58px;height:58px;border-radius:18px;
+      display:grid;place-items:center;
+      background:linear-gradient(135deg,#6d3dff,#a968ff);
+      box-shadow:0 0 35px rgba(124,77,255,.35);
+      font-size:28px;
+      margin-bottom:20px;
+    }
+    .login-card h1 { margin:0 0 8px; font-size:28px; }
+    .login-card p { margin:0 0 26px; color:var(--muted); }
+    .field { margin-bottom:15px; }
+    .field label { display:block; font-size:12px;color:#8995ac;margin:0 0 8px; }
+    .field input {
+      width:100%;padding:13px 14px;border-radius:12px;
+      border:1px solid var(--line);outline:0;
+      background:#080d18;color:#fff;
+    }
+    .field input:focus { border-color:rgba(124,77,255,.7); }
+    .login-btn {
+      width:100%;border:0;padding:14px;border-radius:13px;
+      background:linear-gradient(135deg,#6d3dff,#8b5cff);
+      color:#fff;font-weight:700;cursor:pointer;
+      margin-top:5px;
+    }
+    #loginError { color:#ff7188;font-size:12px;min-height:18px;margin-top:12px; }
+
+    /* Layout */
+    .app-shell { display:flex;min-height:100vh; }
+    .sidebar {
+      width:245px;flex:0 0 245px;
+      position:fixed;left:0;top:0;bottom:0;
+      padding:25px 15px;
+      background:rgba(7,10,18,.88);
+      border-right:1px solid var(--line);
+      backdrop-filter:blur(18px);
+      z-index:20;
+    }
+    .logo {
+      display:flex;align-items:center;gap:11px;
+      padding:0 12px 27px;
+      font-weight:800;font-size:17px;
+    }
+    .logo-icon {
+      width:38px;height:38px;border-radius:12px;
+      display:grid;place-items:center;
+      background:linear-gradient(135deg,#663bff,#a365ff);
+      box-shadow:0 0 24px rgba(124,77,255,.25);
+    }
+    .nav-title {
+      color:#55627a;font-size:10px;font-weight:800;
+      letter-spacing:1.4px;padding:8px 13px 10px;
+    }
+    .nav-item {
+      width:100%;display:flex;align-items:center;gap:12px;
+      border:0;background:transparent;color:#7f8ca5;
+      padding:12px 13px;border-radius:12px;margin:3px 0;
+      cursor:pointer;text-align:left;font-size:13px;
+      transition:.2s;
+    }
+    .nav-item:hover { background:#101727;color:#dbe5fa; }
+    .nav-item.active {
+      color:#fff;background:linear-gradient(90deg,rgba(124,77,255,.22),rgba(124,77,255,.06));
+      box-shadow:inset 2px 0 #8c62ff;
+    }
+    .nav-icon { width:20px;text-align:center;font-size:16px; }
+    .sidebar-bottom {
+      position:absolute;left:15px;right:15px;bottom:18px;
+      padding:14px;border-top:1px solid var(--line);
+    }
+    .user-row { display:flex;gap:9px;align-items:center;margin-bottom:12px; }
+    .avatar {
+      width:33px;height:33px;border-radius:50%;display:grid;place-items:center;
+      background:#1a2132;color:#a995ff;font-weight:800;font-size:12px;
+    }
+    .user-email { font-size:10px;color:#7d8aa2;overflow:hidden;text-overflow:ellipsis; }
+    .logout { width:100%;border:1px solid var(--line);background:#0d1422;color:#a7b2c6;padding:9px;border-radius:9px;cursor:pointer;font-size:11px; }
+
+    .main { margin-left:245px;width:calc(100% - 245px);padding:26px 32px 40px; }
+    .topbar { display:flex;justify-content:space-between;align-items:center;margin-bottom:26px; }
+    .page-title h1 { margin:0;font-size:25px;letter-spacing:-.5px; }
+    .page-title p { margin:6px 0 0;color:var(--muted);font-size:12px; }
+    .live {
+      display:flex;align-items:center;gap:8px;color:#7fd9b8;
+      background:rgba(39,230,160,.06);border:1px solid rgba(39,230,160,.15);
+      padding:8px 12px;border-radius:20px;font-size:11px;
+    }
+    .live-dot { width:7px;height:7px;border-radius:50%;background:#27e6a0;box-shadow:0 0 12px #27e6a0; }
+
+    .page { display:none;animation:fade .25s ease; }
+    .page.active { display:block; }
+    @keyframes fade { from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none} }
+
+    /* Cards */
+    .grid { display:grid;gap:16px; }
+    .sensor-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .control-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+    .card {
+      background:linear-gradient(145deg,rgba(17,24,42,.96),rgba(10,15,27,.96));
+      border:1px solid var(--line);
+      border-radius:18px;
+      box-shadow:0 10px 35px rgba(0,0,0,.18);
+    }
+    .metric-card { padding:19px;position:relative;overflow:hidden; }
+    .metric-card:after {
+      content:"";position:absolute;right:-40px;top:-50px;width:130px;height:130px;border-radius:50%;
+      background:rgba(124,77,255,.06);filter:blur(5px);
+    }
+    .metric-head { display:flex;align-items:center;justify-content:space-between; }
+    .metric-label { color:#8390a8;font-size:11px;font-weight:600; }
+    .metric-icon {
+      width:36px;height:36px;border-radius:11px;display:grid;place-items:center;font-size:17px;
+    }
+    .temp-icon { background:rgba(255,159,67,.13);color:#ff9f43; }
+    .hum-icon { background:rgba(25,200,255,.12);color:#19c8ff; }
+    .metric-value { font-size:30px;font-weight:800;margin:20px 0 6px;letter-spacing:-1px; }
+    .metric-status { color:#4fd9ae;font-size:10px; }
+
+    /* Home illustration */
+    .home-grid { display:grid;grid-template-columns:1.45fr .8fr;gap:16px;margin-top:16px; }
+    .house-card { min-height:430px;padding:22px;position:relative;overflow:hidden; }
+    .section-title { font-size:13px;font-weight:750;margin:0; }
+    .section-sub { font-size:10px;color:#68768f;margin-top:5px; }
+    .house-wrap { position:absolute;inset:88px 25px 18px;display:grid;place-items:center; }
+    .house {
+      width:min(520px,90%);height:280px;position:relative;
+      filter:drop-shadow(0 20px 30px rgba(0,0,0,.35));
+    }
+    .roof {
+      position:absolute;left:8%;top:0;width:84%;height:125px;
+      background:linear-gradient(135deg,#18243a,#10192b);
+      clip-path:polygon(50% 0,100% 100%,0 100%);
+      border:1px solid rgba(124,77,255,.18);
+    }
+    .house-body {
+      position:absolute;left:16%;right:16%;bottom:0;height:185px;
+      background:linear-gradient(145deg,#182239,#101727);
+      border:1px solid rgba(255,255,255,.06);
+      border-radius:4px 4px 12px 12px;
+    }
+    .window {
+      position:absolute;width:70px;height:70px;top:55px;border-radius:10px;
+      background:#08101c;border:2px solid #27344e;box-shadow:inset 0 0 22px rgba(25,200,255,.08);
+    }
+    .window:before,.window:after {content:"";position:absolute;background:#27344e;}
+    .window:before {width:100%;height:2px;top:50%;left:0;}
+    .window:after {height:100%;width:2px;left:50%;top:0;}
+    .window.left {left:18%;}.window.right {right:18%;}
+    .door {
+      position:absolute;bottom:0;left:calc(50% - 28px);width:56px;height:105px;
+      border-radius:10px 10px 0 0;background:#0a101d;border:1px solid #2a3852;
+    }
+    .door-dot { position:absolute;right:9px;top:53%;width:5px;height:5px;border-radius:50%;background:#f8d37a; }
+    .home-bulb {
+      position:absolute;left:50%;top:35px;transform:translateX(-50%);
+      width:17px;height:17px;border-radius:50%;background:#555d6c;
+      box-shadow:none;transition:.3s;
+    }
+    .home-bulb.on { background:#fff3b2;box-shadow:0 0 15px 7px rgba(255,205,69,.75); }
+    .home-label {
+      position:absolute;padding:6px 9px;border-radius:8px;background:#0b1220;border:1px solid var(--line);
+      font-size:9px;color:#aebbd0;white-space:nowrap;
+    }
+    .label-temp {left:0;top:72px;}.label-hum {right:0;top:72px;}
+    .label-led {left:50%;transform:translateX(-50%);top:7px;}
+    .label-fan {right:2%;bottom:25px;}.label-servo {left:2%;bottom:25px;}
+    .home-side { padding:20px; }
+    .quick-row { display:flex;align-items:center;justify-content:space-between;padding:15px 0;border-bottom:1px solid var(--line); }
+    .quick-left { display:flex;align-items:center;gap:11px; }
+    .quick-icon { width:38px;height:38px;border-radius:11px;display:grid;place-items:center;background:#121c30; }
+    .quick-name { font-size:11px;font-weight:700; }
+    .quick-value { font-size:10px;color:#71809b;margin-top:3px; }
+    .state-on { color:#27e6a0; }.state-off { color:#71809b; }
+
+    /* Controls */
+    .control-card { padding:22px; }
+    .control-card h3 {margin:0;font-size:14px;}
+    .control-card p {margin:6px 0 22px;color:#697791;font-size:10px;line-height:1.5;}
+    .toggle-wrap {display:flex;align-items:center;justify-content:space-between;padding-top:10px;}
+    .switch {position:relative;width:58px;height:31px;}
+    .switch input {display:none;}
+    .switch span {position:absolute;inset:0;background:#222c3f;border-radius:20px;cursor:pointer;transition:.2s;border:1px solid var(--line);}
+    .switch span:before {content:"";position:absolute;width:23px;height:23px;left:3px;top:3px;border-radius:50%;background:#8b97aa;transition:.2s;}
+    .switch input:checked + span {background:rgba(124,77,255,.45);border-color:rgba(124,77,255,.6);}
+    .switch input:checked + span:before {transform:translateX(27px);background:#fff;box-shadow:0 0 13px rgba(124,77,255,.8);}
+    .device-state {font-size:13px;font-weight:800;}
+    .device-state.on {color:#27e6a0;}.device-state.off{color:#71809b;}
+
+    .range-wrap {margin-top:12px;}
+    input[type=range] {width:100%;accent-color:#7c4dff;cursor:pointer;}
+    .range-meta {display:flex;justify-content:space-between;color:#61708a;font-size:10px;margin-top:5px;}
+    .big-control-value {font-size:39px;font-weight:850;letter-spacing:-2px;margin:10px 0 5px;}
+    .control-pill {display:inline-flex;padding:5px 8px;border-radius:7px;background:#141e32;color:#9aa8bf;font-size:9px;}
+
+    /* Chart */
+    .chart-card {margin-top:16px;padding:20px;}
+    .chart-head {display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:15px;}
+    .chart-container {height:390px;}
+    .periods {display:flex;gap:5px;}
+    .periods button {border:1px solid var(--line);background:#0c1321;color:#74819a;border-radius:7px;padding:5px 9px;font-size:9px;}
+    .periods button.active {background:#191f38;color:#b9a5ff;border-color:rgba(124,77,255,.3);}
+
+    /* Servo */
+    .servo-center {display:grid;place-items:center;padding:20px 0;}
+    .dial {
+      width:230px;height:115px;position:relative;overflow:hidden;
+      border-radius:230px 230px 0 0;
+      background:conic-gradient(from 270deg at 50% 100%, #7c4dff 0deg, #19c8ff 80deg, #27334a 80deg, #27334a 180deg);
+      opacity:.9;
+    }
+    .dial:after {content:"";position:absolute;left:23px;right:23px;bottom:-70px;height:140px;border-radius:50%;background:#0d1423;}
+    .needle {position:absolute;z-index:3;left:50%;bottom:9px;width:4px;height:91px;background:#fff;border-radius:5px;transform-origin:50% 100%;box-shadow:0 0 12px rgba(255,255,255,.45);}
+    .needle-dot {position:absolute;z-index:4;left:calc(50% - 8px);bottom:0;width:16px;height:16px;border-radius:50%;background:#7c4dff;border:3px solid #e8eaff;}
+    .angle-value {font-size:42px;font-weight:850;text-align:center;margin-top:15px;}
+
+    /* Responsive */
+    @media(max-width:1050px) {
+      .sidebar {width:210px;flex-basis:210px;}
+      .main {margin-left:210px;width:calc(100% - 210px);padding:22px;}
+      .control-grid {grid-template-columns:1fr 1fr;}
+      .home-grid {grid-template-columns:1fr;}
+    }
+    @media(max-width:760px) {
+      .sidebar {position:static;width:100%;height:auto;display:flex;overflow:auto;padding:10px;border-right:0;border-bottom:1px solid var(--line);}
+      .logo {padding:7px 10px;}
+      .nav-title,.sidebar-bottom {display:none;}
+      .nav-item {min-width:max-content;width:auto;}
+      .app-shell {display:block;}
+      .main {margin:0;width:100%;padding:18px 13px 30px;}
+      .sensor-grid,.control-grid {grid-template-columns:1fr;}
+      .topbar {align-items:flex-start;gap:10px;}
+      .live {display:none;}
+      .house-card {min-height:390px;}
+      .house {transform:scale(.83);}
+    }
+  </style>
+</head>
+
+<body>
+
+<!-- ================= LOGIN ================= -->
+<section id="loginScreen">
+  <div class="login-card">
+    <div class="brand-mark">⌂</div>
+    <h1>Smart IoT Home</h1>
+    <p>ESP32 Firebase Monitoring & Control</p>
+
+    <form id="loginForm">
+      <div class="field">
+        <label>EMAIL ADDRESS</label>
+        <input id="email" type="email" placeholder="supun@gmail.com" required>
+      </div>
+
+      <div class="field">
+        <label>PASSWORD</label>
+        <input id="password" type="password" placeholder="••••••••" required>
+      </div>
+
+      <button class="login-btn" type="submit">Sign In to Dashboard</button>
+      <div id="loginError"></div>
+    </form>
+  </div>
+</section>
+
+<!-- ================= APP ================= -->
+<div id="app" class="app-shell hidden">
+
+  <aside class="sidebar">
+    <div class="logo">
+      <div class="logo-icon">⌂</div>
+      <div>Smart IoT Home</div>
+    </div>
+
+    <div class="nav-title">MAIN MENU</div>
+
+    <button class="nav-item active" data-page="home">
+      <span class="nav-icon">⌂</span> Home Overview
+    </button>
+
+    <button class="nav-item" data-page="sensors">
+      <span class="nav-icon">◉</span> Temperature & Humidity
+    </button>
+
+    <div class="nav-title">DEVICE CONTROL</div>
+
+    <button class="nav-item" data-page="led">
+      <span class="nav-icon">◉</span> Bulb Control
+    </button>
+
+    <button class="nav-item" data-page="fan">
+      <span class="nav-icon">✦</span> PWM Fan Control
+    </button>
+
+    <button class="nav-item" data-page="servo">
+      <span class="nav-icon">◌</span> Servo Angle
+    </button>
+
+    <div class="sidebar-bottom">
+      <div class="user-row">
+        <div class="avatar">SR</div>
+        <div class="user-email" id="userEmail">User</div>
+      </div>
+      <button class="logout" id="logoutBtn">Sign Out</button>
+    </div>
+  </aside>
+
+  <main class="main">
+
+    <div class="topbar">
+      <div class="page-title">
+        <h1 id="pageHeading">Home Overview</h1>
+        <p id="pageDescription">Real-time ESP32 smart home monitoring and control</p>
+      </div>
+      <div class="live"><span class="live-dot"></span> Firebase Live</div>
+    </div>
+
+    <!-- ================= HOME ================= -->
+    <section class="page active" id="page-home">
+
+      <div class="grid sensor-grid">
+        <div class="card metric-card">
+          <div class="metric-head">
+            <div class="metric-label">TEMPERATURE</div>
+            <div class="metric-icon temp-icon">♨</div>
+          </div>
+          <div class="metric-value" id="temperatureHome">-- °C</div>
+          <div class="metric-status" id="tempStatus">Waiting for ESP32...</div>
+        </div>
+
+        <div class="card metric-card">
+          <div class="metric-head">
+            <div class="metric-label">HUMIDITY</div>
+            <div class="metric-icon hum-icon">💧</div>
+          </div>
+          <div class="metric-value" id="humidityHome">-- %</div>
+          <div class="metric-status" id="humStatus">Waiting for ESP32...</div>
+        </div>
+      </div>
+
+      <div class="home-grid">
+
+        <div class="card house-card">
+          <div class="section-title">IoT Smart Home</div>
+          <div class="section-sub">Live device status & sensor overview</div>
+
+          <div class="house-wrap">
+            <div class="house">
+              <div class="roof"></div>
+              <div class="house-body">
+                <div class="window left"></div>
+                <div class="window right"></div>
+                <div class="door"><span class="door-dot"></span></div>
+                <div class="home-bulb" id="homeBulb"></div>
+              </div>
+
+              <div class="home-label label-temp">🌡 <span id="tempSmall">-- °C</span></div>
+              <div class="home-label label-hum">💧 <span id="humSmall">-- %</span></div>
+              <div class="home-label label-led">Bulb: <b id="ledHomeState">OFF</b></div>
+              <div class="home-label label-fan">Fan: <b id="fanValue">0%</b></div>
+              <div class="home-label label-servo">Servo: <b id="servoValue">90°</b></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card home-side">
+          <div class="section-title">Quick Status</div>
+          <div class="section-sub">Current Firebase device values</div>
+
+          <div class="quick-row">
+            <div class="quick-left">
+              <div class="quick-icon">💡</div>
+              <div><div class="quick-name">Bulb</div><div class="quick-value">LED / GPIO 14</div></div>
+            </div>
+            <b id="ledState" class="device-state off">OFF</b>
+          </div>
+
+          <div class="quick-row">
+            <div class="quick-left">
+              <div class="quick-icon">✦</div>
+              <div><div class="quick-name">PWM Fan</div><div class="quick-value">0–255 PWM</div></div>
+            </div>
+            <b id="fanPwmValue">0</b>
+          </div>
+
+          <div class="quick-row">
+            <div class="quick-left">
+              <div class="quick-icon">◌</div>
+              <div><div class="quick-name">Servo</div><div class="quick-value">0–180 degrees</div></div>
+            </div>
+            <b id="servoAngleText">90°</b>
+          </div>
+
+          <div class="quick-row">
+            <div class="quick-left">
+              <div class="quick-icon">⚡</div>
+              <div><div class="quick-name">Connection</div><div class="quick-value">ESP32 + Firebase</div></div>
+            </div>
+            <b class="state-on">ONLINE</b>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= SENSORS ================= -->
+    <section class="page" id="page-sensors">
+
+      <div class="grid sensor-grid">
+        <div class="card metric-card">
+          <div class="metric-head">
+            <div class="metric-label">DHT22 TEMPERATURE</div>
+            <div class="metric-icon temp-icon">♨</div>
+          </div>
+          <div class="metric-value" id="temperature">-- °C</div>
+          <div class="metric-status">Real-time Firebase value</div>
+        </div>
+
+        <div class="card metric-card">
+          <div class="metric-head">
+            <div class="metric-label">DHT22 HUMIDITY</div>
+            <div class="metric-icon hum-icon">💧</div>
+          </div>
+          <div class="metric-value" id="humidity">-- %</div>
+          <div class="metric-status">Real-time Firebase value</div>
+        </div>
+      </div>
+
+      <div class="card chart-card">
+        <div class="chart-head">
+          <div>
+            <div class="section-title">Temperature & Humidity History</div>
+            <div class="section-sub">Live readings received from the ESP32</div>
+          </div>
+          <div class="periods">
+            <button class="active">LIVE</button>
+            <button>30</button>
+            <button>ALL</button>
+          </div>
+        </div>
+        <div class="chart-container">
+          <canvas id="sensorChart"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= LED ================= -->
+    <section class="page" id="page-led">
+      <div class="card control-card" style="max-width:720px;">
+        <h3>💡 Bulb / LED Control</h3>
+        <p>Control the ESP32 bulb output remotely through Firebase Realtime Database.</p>
+
+        <div class="toggle-wrap">
+          <div>
+            <div class="section-title">Bulb Power</div>
+            <div class="section-sub">GPIO 14 • Firebase /LED/digital</div>
+          </div>
+
+          <label class="switch">
+            <input id="ledToggle" type="checkbox"
+              onchange="window.control.led(this.checked)">
+            <span></span>
+          </label>
+        </div>
+
+        <div style="margin-top:22px;">
+          Current status:
+          <strong id="ledState" class="device-state off">OFF</strong>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= FAN ================= -->
+    <section class="page" id="page-fan">
+      <div class="card control-card" style="max-width:720px;">
+        <h3>✦ PWM Fan Control</h3>
+        <p>Adjust the fan speed from 0% to 100%. The dashboard stores the PWM value in Firebase and the ESP32 applies it to the fan.</p>
+
+        <div class="big-control-value" id="fanValue">0%</div>
+        <span class="control-pill">PWM: <b id="fanPwmValue">0</b> / 255</span>
+
+        <div class="range-wrap">
+          <input id="fanSlider" type="range" min="0" max="255" value="0"
+            oninput="document.getElementById('fanValue').textContent = Math.round(this.value/255*100)+'%'"
+            onchange="window.control.fan(this.value)">
+          <div class="range-meta">
+            <span>OFF</span>
+            <span>50%</span>
+            <span>MAX</span>
+          </div>
+        </div>
+
+        <div style="margin-top:25px;color:#78859c;font-size:11px;">
+          Status: <b id="fanStatus" style="color:#27e6a0;">Fan OFF</b>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= SERVO ================= -->
+    <section class="page" id="page-servo">
+      <div class="card control-card" style="max-width:720px;">
+        <h3>◌ Servo Angle Control</h3>
+        <p>Set the servo motor position between 0° and 180°. The angle is synchronized with Firebase.</p>
+
+        <div class="servo-center">
+          <div class="dial">
+            <div class="needle" id="servoNeedle"></div>
+            <div class="needle-dot"></div>
+          </div>
+          <div class="angle-value" id="servoAngleText">90°</div>
+        </div>
+
+        <div class="range-wrap">
+          <input id="servoSlider" type="range" min="0" max="180" value="90"
+            oninput="setServoLocal(this.value)"
+            onchange="window.control.servo(this.value)">
+          <div class="range-meta">
+            <span>0°</span>
+            <span>90°</span>
+            <span>180°</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+  // Navigation
+  const pageInfo = {
+    home: ["Home Overview", "Real-time ESP32 smart home monitoring and control"],
+    sensors: ["Temperature & Humidity", "DHT22 sensor readings and live history"],
+    led: ["Bulb Control", "Remote ON / OFF control for the ESP32 bulb"],
+    fan: ["PWM Fan Control", "Adjust the fan speed using PWM"],
+    servo: ["Servo Angle", "Control the servo motor from 0° to 180°"]
+  };
+
+  document.querySelectorAll(".nav-item").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const page = btn.dataset.page;
+
+      document.querySelectorAll(".nav-item").forEach(x => x.classList.remove("active"));
+      btn.classList.add("active");
+
+      document.querySelectorAll(".page").forEach(x => x.classList.remove("active"));
+      document.getElementById("page-" + page).classList.add("active");
+
+      document.getElementById("pageHeading").textContent = pageInfo[page][0];
+      document.getElementById("pageDescription").textContent = pageInfo[page][1];
+    });
+  });
+
+  function setServoLocal(value) {
+    document.getElementById("servoAngleText").textContent = value + "°";
+    const needle = document.getElementById("servoNeedle");
+    if (needle) needle.style.transform = `rotate(${value - 90}deg)`;
+  }
+</script>
+
+</body>
+</html>
